@@ -1,4 +1,5 @@
-> Blog Post: [https://blakedrumm.com/blog/scom-db-move-tool/](https://blakedrumm.com/blog/scom-db-move-tool)
+> :notebook: **Blog Post:** [https://blakedrumm.com/blog/scom-db-move-tool/](https://blakedrumm.com/blog/scom-db-move-tool) \
+> :arrow_down_small: **Quick Download:** [https://aka.ms/SCOM-DB-Move-Tool](https://aka.ms/SCOM-DB-Move-Tool)
 
 [![Visits Badge](https://badges.strrl.dev/visits/blakedrumm/SCOM-Reconfigure-DB-Move-Tool)](https://badges.strrl.dev) \
 [![Latest Version](https://img.shields.io/github/v/release/blakedrumm/SCOM-Reconfigure-DB-Move-Tool)](https://github.com/blakedrumm/SCOM-Reconfigure-DB-Move-Tool/releases/latest) \
