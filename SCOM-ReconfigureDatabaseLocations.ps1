@@ -1,4 +1,4 @@
-#------------------------------------------------------------------------
+﻿#------------------------------------------------------------------------
 # Source File Information (DO NOT MODIFY)
 # Source ID: f09ba4a8-4e31-4889-add8-40344602faf0
 # Source File: C:\Users\blakedrumm\OneDrive - Microsoft\Documents\SAPIEN\PowerShell Studio\Projects\Migrate-SCOMDatabase\SCOM-ReconfigureDatabaseLocations.psproj
@@ -11843,7 +11843,7 @@ SimllArY/wdfRzP54wZmXAAAAABJRU5ErkJgggs='))
 	#--------------------------------------------
 	# Declare Global Variables and Functions here
 	#--------------------------------------------
-	$ScriptMoveVersion = '2.5.0.0'
+	$ScriptMoveVersion = '2.5.1.0'
 	
 	function Get-TimeStamp
 	{
@@ -12919,114 +12919,142 @@ ORDER BY mtv.DisplayName
 			
 			$createConnection = (-not $Connection)
 			
-			if ($createConnection)
+			try
 			{
-				$Connection = New-Object System.Data.SqlClient.SQLConnection
-				if ($Username -and $Password)
+				if ($createConnection)
 				{
-					$Connection.ConnectionString = "Server=$($ServerInstance);Database=$($Database);User Id=$($Username);Password=$($Password);"
+					$Connection = New-Object System.Data.SqlClient.SQLConnection
+					$connectionStringBuilder = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
+					$connectionStringBuilder['Data Source'] = $ServerInstance
+					$connectionStringBuilder['Initial Catalog'] = $Database
+					if ($Username -and $Password)
+					{
+						$connectionStringBuilder['User ID'] = $Username
+						$connectionStringBuilder['Password'] = $Password
+					}
+					else
+					{
+						$connectionStringBuilder['Integrated Security'] = $true
+					}
+					$Connection.ConnectionString = $connectionStringBuilder.ConnectionString
+					if ($PSBoundParameters['Verbose'])
+					{
+						$Connection.FireInfoMessageEventOnUserErrors = $false
+						$Connection.Add_InfoMessage([System.Data.SqlClient.SqlInfoMessageEventHandler] { Write-Verbose "$($_)" })
+					}
 				}
-				else
+
+				if (-not ($Connection.State -like "Open"))
 				{
-					$Connection.ConnectionString = "Server=$($ServerInstance);Database=$($Database);Integrated Security=SSPI;"
-				}
-				if ($PSBoundParameters.Verbose)
-				{
-					$Connection.FireInfoMessageEventOnUserErrors = $true
-					$Connection.Add_InfoMessage([System.Data.SqlClient.SqlInfoMessageEventHandler] { Write-Verbose "$($_)" })
+					$Connection.Open()
 				}
 			}
-			
-			if (-not ($Connection.State -like "Open"))
+			catch
 			{
-				try { $Connection.Open() }
-				catch [Exception] { throw $_ }
+				if ($createConnection -and $Connection) { $Connection.Dispose() }
+				throw
 			}
 		}
 		
 		process
 		{
-			$command = New-Object System.Data.SqlClient.SqlCommand ($query, $Connection)
-			$command.CommandTimeout = $Timeout
-			$command.CommandType = $CommandType
-			if ($Parameters)
+			$command = $null
+			try
 			{
-				foreach ($p in $Parameters.Keys)
+				$command = New-Object System.Data.SqlClient.SqlCommand ($query, $Connection)
+				$command.CommandTimeout = $Timeout
+				$command.CommandType = $CommandType
+				if ($Parameters)
 				{
-					$command.Parameters.AddWithValue($p, $Parameters[$p]) | Out-Null
-				}
-			}
-			
-			$scriptBlock = {
-				$result = @()
-				$reader = $command.ExecuteReader()
-				if ($reader)
-				{
-					$counter = $reader.FieldCount
-					$columns = @()
-					for ($i = 0; $i -lt $counter; $i++)
+					foreach ($parameterName in $Parameters.Keys)
 					{
-						$columns += $reader.GetName($i)
+						$command.Parameters.AddWithValue($parameterName, $Parameters[$parameterName]) | Out-Null
 					}
-					
-					if ($reader.HasRows)
+				}
+
+				$scriptBlock = {
+					$result = @()
+					$reader = $command.ExecuteReader()
+					try
 					{
-						while ($reader.Read())
+						if ($reader)
 						{
-							$row = @{ }
-							for ($i = 0; $i -lt $counter; $i++)
+							$counter = $reader.FieldCount
+							$columns = @()
+							for ($columnIndex = 0; $columnIndex -lt $counter; $columnIndex++)
 							{
-								$row[$columns[$i]] = $reader.GetValue($i)
+								$columns += $reader.GetName($columnIndex)
 							}
-							$result += [PSCustomObject]$row
+
+							if ($reader.HasRows)
+							{
+								while ($reader.Read())
+								{
+									$row = @{ }
+									for ($columnIndex = 0; $columnIndex -lt $counter; $columnIndex++)
+									{
+										$row[$columns[$columnIndex]] = $reader.GetValue($columnIndex)
+									}
+									$result += [PSCustomObject]$row
+								}
+							}
 						}
+						$result
+					}
+					finally
+					{
+						if ($reader) { $reader.Dispose() }
 					}
 				}
-				$result
-			}
-			
-			if ($As)
-			{
-				switch ($As)
+
+				if ($As)
 				{
-					"Scalar" {
-						$scriptBlock = {
-							$result = $command.ExecuteScalar()
-							$result
-						}
-					}
-					"NonQuery" {
-						$scriptBlock = {
-							$result = $command.ExecuteNonQuery()
-							$result
-						}
-					}
-					default {
-						if ("DataSet", "DataTable", "DataRow" -contains $As)
-						{
+					switch ($As)
+					{
+						"Scalar" {
 							$scriptBlock = {
-								$ds = New-Object System.Data.DataSet
-								$da = New-Object System.Data.SqlClient.SqlDataAdapter($command)
-								$da.Fill($ds) | Out-Null
-								switch ($As)
-								{
-									"DataSet" { $result = $ds }
-									"DataTable" { $result = $ds.Tables }
-									default { $result = $ds.Tables | ForEach-Object -Process { $_.Rows } }
-								}
+								$result = $command.ExecuteScalar()
 								$result
 							}
 						}
+						"NonQuery" {
+							$scriptBlock = {
+								$result = $command.ExecuteNonQuery()
+								$result
+							}
+						}
+						default {
+							if ("DataSet", "DataTable", "DataRow" -contains $As)
+							{
+								$scriptBlock = {
+									$ds = New-Object System.Data.DataSet
+									$da = New-Object System.Data.SqlClient.SqlDataAdapter($command)
+									try
+									{
+										$da.Fill($ds) | Out-Null
+										switch ($As)
+										{
+											"DataSet" { $result = $ds }
+											"DataTable" { $result = $ds.Tables }
+											default { $result = $ds.Tables | ForEach-Object -Process { $_.Rows } }
+										}
+										$result
+									}
+									finally
+									{
+										$da.Dispose()
+									}
+								}
+							}
+						}
 					}
 				}
-			}
-			$Error.Clear()
-			try
-			{
+				$Error.Clear()
 				$result = Invoke-Command -ScriptBlock $ScriptBlock -ErrorAction Stop
 			}
 			catch
 			{
+				$sqlError = $_
 				$ErrorDetails = @"
 
 User:
@@ -13038,12 +13066,16 @@ Error Details:
 SQL Query:
 	$Query
 "@
-				Write-ActivityLog "Encountered exception while running SQL Query: $ErrorDetails" -IsError
-				
-				Add-Type -AssemblyName PresentationCore, PresentationFramework
-				$ButtonType = [System.Windows.MessageBoxButton]::OK
-				$MessageIcon = [System.Windows.MessageBoxImage]::Error
-				$MessageBody = @"
+				try
+				{
+					Write-ActivityLog "Encountered exception while running SQL Query: $ErrorDetails" -IsError
+
+					if ($Host.Name -ne 'ServerRemoteHost' -and $PSBoundParameters['ErrorAction'] -ne [System.Management.Automation.ActionPreference]::Stop)
+					{
+						Add-Type -AssemblyName PresentationCore, PresentationFramework
+						$ButtonType = [System.Windows.MessageBoxButton]::OK
+						$MessageIcon = [System.Windows.MessageBoxImage]::Error
+						$MessageBody = @"
 Event ID:
 40
 
@@ -13055,17 +13087,33 @@ Error Details:
 
 For more details see the Application Event Log (Event ID: 40).
 "@
-				$MessageTitle = "Encountered exception while attempting to run SQL Query"
-				$Result = [System.Windows.MessageBox]::Show($MessageBody, $MessageTitle, $ButtonType, $MessageIcon)
+						$MessageTitle = "Encountered exception while attempting to run SQL Query"
+						$Result = [System.Windows.MessageBox]::Show($MessageBody, $MessageTitle, $ButtonType, $MessageIcon)
+					}
+				}
+				catch
+				{
+					Write-Warning "Unable to display or log the SQL error: $($_.Exception.Message)" -WarningAction Continue
+				}
+				$PSCmdlet.ThrowTerminatingError($sqlError)
 			}
-			$command.Parameters.Clear()
+			finally
+			{
+				if ($command)
+				{
+					$command.Parameters.Clear()
+					$command.Dispose()
+				}
+				if ($createConnection)
+				{
+					$Connection.Close()
+					$Connection.Dispose()
+				}
+			}
 		}
 		
 		end
 		{
-			if ($createConnection) { $Connection.Close() }
-			$command.Dispose()
-			$Connection.Dispose()
 			$result
 		}
 	}
@@ -13586,20 +13634,26 @@ For more details see the Application Event Log (Event ID: 40).
 ------------------------------------------------------
 
 -- Operations Manager DB Info
-DECLARE @OriginalOpsMgrSQLDB nvarchar(50) = '$OldSQLDatabase'
-DECLARE @OpsMgrSQLInstance nvarchar(50) = '$NewOpsDBServerName'
+DECLARE @OriginalOpsMgrSQLDB sysname = DB_NAME()
+DECLARE @OpsMgrSQLInstance nvarchar(max) = @NewOpsDBServerName
 
 -- Operations Manager DW DB Info
-DECLARE @DWSQLInstance nvarchar(50) = '$NewDWServerName'
+DECLARE @DWSQLInstance nvarchar(max) = @NewDWServerName
 
 ------------------------------------------------------
 -- DO NOT EDIT BELOW THIS LINE
 ------------------------------------------------------
 
-DECLARE @UseOpsMgrDB nvarchar(50) = QUOTENAME(@OriginalOpsMgrSQLDB) + N'.sys.sp_executesql'
-DECLARE @tblName varchar(100)
-DECLARE @colName varchar(100)
-DECLARE @sqlstmt nvarchar(1000)
+DECLARE @UseOpsMgrDB nvarchar(max) = QUOTENAME(@OriginalOpsMgrSQLDB) + N'.sys.sp_executesql'
+DECLARE @tblName sysname
+DECLARE @colName sysname
+DECLARE @sqlstmt nvarchar(max)
+
+SET NOCOUNT ON
+SET ANSI_WARNINGS ON
+SET XACT_ABORT ON
+BEGIN TRY
+BEGIN TRANSACTION
 
 BEGIN TRY
 IF (EXISTS (SELECT * 
@@ -13614,9 +13668,9 @@ BEGIN CATCH
 END CATCH
 CREATE TABLE #tmp_DBMigration
 (
-	TableName varchar(100),
-	OldValue varchar(50),
-	NewValue varchar(50)
+	TableName sysname,
+	OldValue nvarchar(max),
+	NewValue nvarchar(max)
 )
 
 BEGIN TRY
@@ -13631,43 +13685,25 @@ END CATCH
 --USE OperationsManager
 
 SET @tblName = 'MT_Microsoft`$SystemCenter`$ManagementGroup'
-SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'SQLServerName_%')
+SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'SQLServerName_%')
+IF @colName IS NULL THROW 50000, 'A required SCOM server-name column was not found.', 1;
 
-SET @sqlstmt = N'INSERT INTO #tmp_DBMigration SELECT TOP(1) ''' + @tblName + ''' AS TableName, ' + @colName + ' AS OldValue, NULL AS NewValue FROM ' + @tblName
-exec @UseOpsMgrDB @sqlstmt
-
-SET @sqlstmt = N'UPDATE TOP(1) ' + @tblName + ' SET ' + @colName + ' = ''' + @OpsMgrSQLInstance + ''''
---select @sqlstmt
-exec @UseOpsMgrDB @sqlstmt
-
-SET @sqlstmt = N'UPDATE #tmp_DBMigration SET NewValue = (SELECT TOP(1) ' + @colName + ' FROM ' + @tblName + ') WHERE TableName = ''' + @tblName + ''''
-exec @UseOpsMgrDB @sqlstmt
+SET @sqlstmt = N'UPDATE TOP(1) [dbo].' + QUOTENAME(@tblName) + N' SET ' + QUOTENAME(@colName) + N' = @ServerName OUTPUT @TableName, deleted.' + QUOTENAME(@colName) + N', inserted.' + QUOTENAME(@colName) + N' INTO #tmp_DBMigration (TableName, OldValue, NewValue)'
+exec @UseOpsMgrDB @sqlstmt, N'@ServerName nvarchar(max), @TableName sysname', @ServerName = @OpsMgrSQLInstance, @TableName = @tblName
 
 SET @tblName = 'MT_Microsoft`$SystemCenter`$OpsMgrDB`$AppMonitoring'
-SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'MainDatabaseServerName_%')
+SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'MainDatabaseServerName_%')
+IF @colName IS NULL THROW 50000, 'A required SCOM server-name column was not found.', 1;
 
-SET @sqlstmt = N'INSERT INTO #tmp_DBMigration SELECT TOP(1) ''' + @tblName + ''' AS TableName, ' + @colName + ' AS OldValue, NULL AS NewValue FROM ' + @tblName
-exec @UseOpsMgrDB @sqlstmt
-
-SET @sqlstmt = N'UPDATE TOP(1) ' + @tblName + ' SET ' + @colName + ' = ''' + @OpsMgrSQLInstance + ''''
---select @sqlstmt
-exec @UseOpsMgrDB @sqlstmt
-
-SET @sqlstmt = N'UPDATE #tmp_DBMigration SET NewValue = (SELECT TOP(1) ' + @colName + ' FROM ' + @tblName + ') WHERE TableName = ''' + @tblName + ''''
-exec @UseOpsMgrDB @sqlstmt
+SET @sqlstmt = N'UPDATE TOP(1) [dbo].' + QUOTENAME(@tblName) + N' SET ' + QUOTENAME(@colName) + N' = @ServerName OUTPUT @TableName, deleted.' + QUOTENAME(@colName) + N', inserted.' + QUOTENAME(@colName) + N' INTO #tmp_DBMigration (TableName, OldValue, NewValue)'
+exec @UseOpsMgrDB @sqlstmt, N'@ServerName nvarchar(max), @TableName sysname', @ServerName = @OpsMgrSQLInstance, @TableName = @tblName
 
 SET @tblName = 'MT_Microsoft`$SystemCenter`$OpsMgrDB`$AppMonitoring_Log'
-SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'Post_MainDatabaseServerName_%')
+SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'Post_MainDatabaseServerName_%')
+IF @colName IS NULL THROW 50000, 'A required SCOM server-name column was not found.', 1;
 
-SET @sqlstmt = N'INSERT INTO #tmp_DBMigration SELECT TOP(1) ''' + @tblName + ''' AS TableName, ' + @colName + ' AS OldValue, NULL AS NewValue FROM ' + @tblName
-exec @UseOpsMgrDB @sqlstmt
-
-SET @sqlstmt = N'UPDATE TOP(1) ' + @tblName + ' SET ' + @colName + ' = ''' + @OpsMgrSQLInstance + ''''
---select @sqlstmt
-exec @UseOpsMgrDB @sqlstmt
-
-SET @sqlstmt = N'UPDATE #tmp_DBMigration SET NewValue = (SELECT TOP(1) ' + @colName + ' FROM ' + @tblName + ') WHERE TableName = ''' + @tblName + ''''
-exec @UseOpsMgrDB @sqlstmt
+SET @sqlstmt = N'UPDATE TOP(1) [dbo].' + QUOTENAME(@tblName) + N' SET ' + QUOTENAME(@colName) + N' = @ServerName OUTPUT @TableName, deleted.' + QUOTENAME(@colName) + N', inserted.' + QUOTENAME(@colName) + N' INTO #tmp_DBMigration (TableName, OldValue, NewValue)'
+exec @UseOpsMgrDB @sqlstmt, N'@ServerName nvarchar(max), @TableName sysname', @ServerName = @OpsMgrSQLInstance, @TableName = @tblName
 
 --
 --End update OperationsManager
@@ -13679,99 +13715,70 @@ exec @UseOpsMgrDB @sqlstmt
 --USE OperationsManager
 
 SET @tblName = 'MT_Microsoft`$SystemCenter`$DataWarehouse'
-SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'MainDatabaseServerName_%')
+SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'MainDatabaseServerName_%')
+IF @colName IS NULL THROW 50000, 'A required SCOM server-name column was not found.', 1;
 
-SET @sqlstmt = N'INSERT INTO #tmp_DBMigration SELECT TOP(1) ''' + @tblName + ''' AS TableName, ' + @colName + ' AS OldValue, NULL AS NewValue FROM ' + @tblName
-exec @UseOpsMgrDB @sqlstmt
-
-SET @sqlstmt = N'UPDATE TOP(1) ' + @tblName + ' SET ' + @colName + ' = ''' + @DWSQLInstance + ''''
---select @sqlstmt
-exec @UseOpsMgrDB @sqlstmt
-
-SET @sqlstmt = N'UPDATE #tmp_DBMigration SET NewValue = (SELECT TOP(1) ' + @colName + ' FROM ' + @tblName + ') WHERE TableName = ''' + @tblName + ''''
-exec @UseOpsMgrDB @sqlstmt
+SET @sqlstmt = N'UPDATE TOP(1) [dbo].' + QUOTENAME(@tblName) + N' SET ' + QUOTENAME(@colName) + N' = @ServerName OUTPUT @TableName, deleted.' + QUOTENAME(@colName) + N', inserted.' + QUOTENAME(@colName) + N' INTO #tmp_DBMigration (TableName, OldValue, NewValue)'
+exec @UseOpsMgrDB @sqlstmt, N'@ServerName nvarchar(max), @TableName sysname', @ServerName = @DWSQLInstance, @TableName = @tblName
 
 
 SET @tblName = 'MT_Microsoft`$SystemCenter`$DataWarehouse`$AppMonitoring'
-SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'MainDatabaseServerName_%')
+SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'MainDatabaseServerName_%')
+IF @colName IS NULL THROW 50000, 'A required SCOM server-name column was not found.', 1;
 
-SET @sqlstmt = N'INSERT INTO #tmp_DBMigration SELECT TOP(1) ''' + @tblName + ''' AS TableName, ' + @colName + ' AS OldValue, NULL AS NewValue FROM ' + @tblName
-exec @UseOpsMgrDB @sqlstmt
-
-SET @sqlstmt = N'UPDATE TOP(1) ' + @tblName + ' SET ' + @colName + ' = ''' + @DWSQLInstance + ''''
---select @sqlstmt
-exec @UseOpsMgrDB @sqlstmt
-
-SET @sqlstmt = N'UPDATE #tmp_DBMigration SET NewValue = (SELECT TOP(1) ' + @colName + ' FROM ' + @tblName + ') WHERE TableName = ''' + @tblName + ''''
-exec @UseOpsMgrDB @sqlstmt
+SET @sqlstmt = N'UPDATE TOP(1) [dbo].' + QUOTENAME(@tblName) + N' SET ' + QUOTENAME(@colName) + N' = @ServerName OUTPUT @TableName, deleted.' + QUOTENAME(@colName) + N', inserted.' + QUOTENAME(@colName) + N' INTO #tmp_DBMigration (TableName, OldValue, NewValue)'
+exec @UseOpsMgrDB @sqlstmt, N'@ServerName nvarchar(max), @TableName sysname', @ServerName = @DWSQLInstance, @TableName = @tblName
 
 
 SET @tblName = 'MT_Microsoft`$SystemCenter`$DataWarehouse`$AppMonitoring_Log'
-SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'Post_MainDatabaseServerName_%')
+SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'Post_MainDatabaseServerName_%')
+IF @colName IS NULL THROW 50000, 'A required SCOM server-name column was not found.', 1;
 
-SET @sqlstmt = N'INSERT INTO #tmp_DBMigration SELECT TOP(1) ''' + @tblName + ''' AS TableName, ' + @colName + ' AS OldValue, NULL AS NewValue FROM ' + @tblName
-exec @UseOpsMgrDB @sqlstmt
-
-SET @sqlstmt = N'UPDATE TOP(1) ' + @tblName + ' SET ' + @colName + ' = ''' + @DWSQLInstance + ''''
---select @sqlstmt
-exec @UseOpsMgrDB @sqlstmt
-
-SET @sqlstmt = N'UPDATE TOP(1) #tmp_DBMigration SET NewValue = (SELECT ' + @colName + ' FROM ' + @tblName + ') WHERE TableName = ''' + @tblName + ''''
-exec @UseOpsMgrDB @sqlstmt
+SET @sqlstmt = N'UPDATE TOP(1) [dbo].' + QUOTENAME(@tblName) + N' SET ' + QUOTENAME(@colName) + N' = @ServerName OUTPUT @TableName, deleted.' + QUOTENAME(@colName) + N', inserted.' + QUOTENAME(@colName) + N' INTO #tmp_DBMigration (TableName, OldValue, NewValue)'
+exec @UseOpsMgrDB @sqlstmt, N'@ServerName nvarchar(max), @TableName sysname', @ServerName = @DWSQLInstance, @TableName = @tblName
 
 
 SET @tblName = 'MT_Microsoft`$SystemCenter`$DataWarehouse_Log'
-SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'Post_MainDatabaseServerName_%')
+SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'Post_MainDatabaseServerName_%')
+IF @colName IS NULL THROW 50000, 'A required SCOM server-name column was not found.', 1;
 
-SET @sqlstmt = N'INSERT INTO #tmp_DBMigration SELECT TOP(1) ''' + @tblName + ''' AS TableName, ' + @colName + ' AS OldValue, NULL AS NewValue FROM ' + @tblName
-exec @UseOpsMgrDB @sqlstmt
-
-SET @sqlstmt = N'UPDATE TOP(1) ' + @tblName + ' SET ' + @colName + ' = ''' + @DWSQLInstance + ''''
---select @sqlstmt
-exec @UseOpsMgrDB @sqlstmt
-
-SET @sqlstmt = N'UPDATE #tmp_DBMigration SET NewValue = (SELECT TOP(1) ' + @colName + ' FROM ' + @tblName + ') WHERE TableName = ''' + @tblName + ''''
-exec @UseOpsMgrDB @sqlstmt
+SET @sqlstmt = N'UPDATE TOP(1) [dbo].' + QUOTENAME(@tblName) + N' SET ' + QUOTENAME(@colName) + N' = @ServerName OUTPUT @TableName, deleted.' + QUOTENAME(@colName) + N', inserted.' + QUOTENAME(@colName) + N' INTO #tmp_DBMigration (TableName, OldValue, NewValue)'
+exec @UseOpsMgrDB @sqlstmt, N'@ServerName nvarchar(max), @TableName sysname', @ServerName = @DWSQLInstance, @TableName = @tblName
 
 
 SET @tblName = 'MT_Microsoft`$SystemCenter`$OpsMgrDWWatcher'
-SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'DatabaseServerName_%')
+SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'DatabaseServerName_%')
+IF @colName IS NULL THROW 50000, 'A required SCOM server-name column was not found.', 1;
 
-SET @sqlstmt = N'INSERT INTO #tmp_DBMigration SELECT TOP(1) ''' + @tblName + ''' AS TableName, ' + @colName + ' AS OldValue, NULL AS NewValue FROM ' + @tblName
-exec @UseOpsMgrDB @sqlstmt
-
-SET @sqlstmt = N'UPDATE TOP(1) ' + @tblName + ' SET ' + @colName + ' = ''' + @DWSQLInstance + ''''
---select @sqlstmt
-exec @UseOpsMgrDB @sqlstmt
-
-SET @sqlstmt = N'UPDATE #tmp_DBMigration SET NewValue = (SELECT TOP(1) ' + @colName + ' FROM ' + @tblName + ') WHERE TableName = ''' + @tblName + ''''
-exec @UseOpsMgrDB @sqlstmt
+SET @sqlstmt = N'UPDATE TOP(1) [dbo].' + QUOTENAME(@tblName) + N' SET ' + QUOTENAME(@colName) + N' = @ServerName OUTPUT @TableName, deleted.' + QUOTENAME(@colName) + N', inserted.' + QUOTENAME(@colName) + N' INTO #tmp_DBMigration (TableName, OldValue, NewValue)'
+exec @UseOpsMgrDB @sqlstmt, N'@ServerName nvarchar(max), @TableName sysname', @ServerName = @DWSQLInstance, @TableName = @tblName
 
 SET @tblName = 'MT_Microsoft`$SystemCenter`$OpsMgrDWWatcher_Log'
-SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'Post_DatabaseServerName_%')
+SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'Post_DatabaseServerName_%')
+IF @colName IS NULL THROW 50000, 'A required SCOM server-name column was not found.', 1;
 
-SET @sqlstmt = N'INSERT INTO #tmp_DBMigration SELECT TOP(1) ''' + @tblName + ''' AS TableName, ' + @colName + ' AS OldValue, NULL AS NewValue FROM ' + @tblName
-exec @UseOpsMgrDB @sqlstmt
-
-SET @sqlstmt = N'UPDATE TOP(1) ' + @tblName + ' SET ' + @colName + ' = ''' + @DWSQLInstance + ''''
---select @sqlstmt
-exec @UseOpsMgrDB @sqlstmt
-
-SET @sqlstmt = N'UPDATE #tmp_DBMigration SET NewValue = (SELECT TOP(1) ' + @colName + ' FROM ' + @tblName + ') WHERE TableName = ''' + @tblName + ''''
-exec @UseOpsMgrDB @sqlstmt
+SET @sqlstmt = N'UPDATE TOP(1) [dbo].' + QUOTENAME(@tblName) + N' SET ' + QUOTENAME(@colName) + N' = @ServerName OUTPUT @TableName, deleted.' + QUOTENAME(@colName) + N', inserted.' + QUOTENAME(@colName) + N' INTO #tmp_DBMigration (TableName, OldValue, NewValue)'
+exec @UseOpsMgrDB @sqlstmt, N'@ServerName nvarchar(max), @TableName sysname', @ServerName = @DWSQLInstance, @TableName = @tblName
 
 --USE OperationsManager
 
-SET @sqlstmt = N'INSERT INTO #tmp_DBMigration SELECT TOP(1) ''GlobalSettings'' AS TableName, SettingValue AS OldValue, NULL AS NewValue FROM GlobalSettings WHERE ManagedTypePropertyId IN (select ManagedTypePropertyId from [dbo].[ManagedTypeProperty] where [ManagedTypePropertyName] like ''MainDatabaseServerName'')
-UPDATE TOP(1) GlobalSettings SET SettingValue = ''' + @DWSQLInstance + ''' WHERE ManagedTypePropertyId IN (select ManagedTypePropertyId from [dbo].[ManagedTypeProperty] where [ManagedTypePropertyName] like ''MainDatabaseServerName'')
-UPDATE #tmp_DBMigration SET NewValue = (SELECT TOP(1) SettingValue FROM GlobalSettings WHERE ManagedTypePropertyId IN (select ManagedTypePropertyId from [dbo].[ManagedTypeProperty] where [ManagedTypePropertyName] like ''MainDatabaseServerName'')) WHERE TableName = ''GlobalSettings'''
+SET @sqlstmt = N'UPDATE TOP(1) dbo.GlobalSettings SET SettingValue = @ServerName OUTPUT N''GlobalSettings'', deleted.SettingValue, inserted.SettingValue INTO #tmp_DBMigration (TableName, OldValue, NewValue) WHERE ManagedTypePropertyId IN (select ManagedTypePropertyId from [dbo].[ManagedTypeProperty] where [ManagedTypePropertyName] like ''MainDatabaseServerName'')'
 
-exec @UseOpsMgrDB @sqlstmt
+exec @UseOpsMgrDB @sqlstmt, N'@ServerName nvarchar(max)', @ServerName = @DWSQLInstance
 
+COMMIT TRANSACTION
 select * from #tmp_DBMigration
 drop table #tmp_DBMigration
+END TRY
+BEGIN CATCH
+IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+THROW;
+END CATCH
 "@
-			Invoke-SqlCommand -ServerInstance $OldSQLInstance -Database $OldSQLDatabase -Query $tsqlQuery -As DataRow | Out-String -Width 4096
+			Invoke-SqlCommand -ServerInstance $OldSQLInstance -Database $OldSQLDatabase -Query $tsqlQuery -Parameters @{
+				'@NewOpsDBServerName' = $NewOpsDBServerName
+				'@NewDWServerName' = $NewDWServerName
+			} -As DataRow -ErrorAction Stop | Out-String -Width 4096
 		}
 		if ($OperationsManagerDW)
 		{
@@ -13785,16 +13792,22 @@ drop table #tmp_DBMigration
 ------------------------------------------------------
 
 -- Operations Manager DW DB Info
-DECLARE @DWSQLInstance nvarchar(50) = '$NewDWServerName'
-DECLARE @DWDBName nvarchar(50) = '$OldSQLDatabase'
+DECLARE @DWSQLInstance nvarchar(max) = @NewDWServerName
+DECLARE @DWDBName sysname = DB_NAME()
 
 ------------------------------------------------------
 -- DO NOT EDIT BELOW THIS LINE
 ------------------------------------------------------
-DECLARE @UseDWDB nvarchar(50) = QUOTENAME(@DWDBName) + N'.sys.sp_executesql'
-DECLARE @tblName varchar(100)
-DECLARE @colName varchar(100)
-DECLARE @sqlstmt nvarchar(1000)
+DECLARE @UseDWDB nvarchar(max) = QUOTENAME(@DWDBName) + N'.sys.sp_executesql'
+DECLARE @tblName sysname
+DECLARE @colName sysname
+DECLARE @sqlstmt nvarchar(max)
+
+SET NOCOUNT ON
+SET ANSI_WARNINGS ON
+SET XACT_ABORT ON
+BEGIN TRY
+BEGIN TRANSACTION
 
 BEGIN TRY;
 IF (EXISTS (SELECT * 
@@ -13809,9 +13822,9 @@ BEGIN CATCH
 END CATCH
 CREATE TABLE #tmp_DBMigrationDW
 (
-	TableName varchar(100),
-	OldValue varchar(50),
-	NewValue varchar(50)
+	TableName sysname,
+	OldValue nvarchar(max),
+	NewValue nvarchar(max)
 )
 
 BEGIN TRY
@@ -13822,15 +13835,22 @@ END CATCH
 
 --USE OperationsManagerDW
 
-SET @sqlstmt = N'INSERT INTO #tmp_DBMigrationDW SELECT TOP(1) ''MemberDatabase'' AS TableName, ServerName AS OldValue, NULL AS NewValue FROM MemberDatabase;
-UPDATE TOP(1) dbo.MemberDatabase SET ServerName = ''' + @DWSQLInstance + '''; UPDATE #tmp_DBMigrationDW SET NewValue = (SELECT TOP(1) ServerName FROM MemberDatabase) WHERE TableName = ''MemberDatabase'''
+SET @sqlstmt = N'UPDATE TOP(1) dbo.MemberDatabase SET ServerName = @ServerName OUTPUT N''MemberDatabase'', deleted.ServerName, inserted.ServerName INTO #tmp_DBMigrationDW (TableName, OldValue, NewValue)'
 
-exec @UseDWDB @sqlstmt
+exec @UseDWDB @sqlstmt, N'@ServerName nvarchar(max)', @ServerName = @DWSQLInstance
 
+COMMIT TRANSACTION
 select * from #tmp_DBMigrationDW
 drop table #tmp_DBMigrationDW
+END TRY
+BEGIN CATCH
+IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+THROW;
+END CATCH
 "@
-			Invoke-SqlCommand -ServerInstance $OldSQLInstance -Database $OldSQLDatabase -Query $tsqlQuery -As DataRow | Out-String -Width 4096
+			Invoke-SqlCommand -ServerInstance $OldSQLInstance -Database $OldSQLDatabase -Query $tsqlQuery -Parameters @{
+				'@NewDWServerName' = $NewDWServerName
+			} -As DataRow -ErrorAction Stop | Out-String -Width 4096
 		}
 	}
 	$invokeModifyDatabase = "function Modify-DatabasesSCOM { ${function:Modify-DatabasesSCOM} }"
@@ -13962,6 +13982,7 @@ EXEC sp_fulltext_database 'enable'
 				$dwSQLinstance,
 				$dwSQLdb) #Pass any arguments using the ArgumentList parameter
 			#Important: Do not access form controls from this script block.
+			$ErrorActionPreference = 'Stop'
 			. ([ScriptBlock]::Create($WriteActivityLogFunction)) #Important: Do not access form controls from this script block.)
 			. ([ScriptBlock]::Create($invokeSQLFunction)) #Important: Do not access form controls from this script block.)
 			. ([ScriptBlock]::Create($script)) #Important: Do not access form controls from this script block.)
@@ -13970,7 +13991,22 @@ EXEC sp_fulltext_database 'enable'
 		}`
 					   -CompletedScript {
 			Param ($Job)
-			$mainResults = Receive-Job -Job $Job
+			try
+			{
+				if ($null -eq $Job) { throw 'The database update job could not be started.' }
+				$mainResults = Receive-Job -Job $Job -ErrorAction Stop
+				if ($Job.State -ne 'Completed') { throw "The database update job ended in state $($Job.State)." }
+			}
+			catch
+			{
+				$text = "Database update failed: $($_.Exception.Message)"
+				$toolstripstatusStep.Visible = $true
+				$toolstripstatusStep.Text = $text
+				$buttonStart.Enabled = $true
+				$buttonStart.BackColor = [System.Drawing.SystemColors]::Control
+				Write-ActivityLog $text -IsError
+				return
+			}
 			if ($mainResults)
 			{
 				Write-ActivityLog $mainResults
@@ -13978,6 +14014,10 @@ EXEC sp_fulltext_database 'enable'
 			else
 			{
 				Write-ActivityLog "Empty results! Something is wrong!" -IsError
+				$toolstripstatusStep.Text = 'Database update failed: no audit results were returned.'
+				$buttonStart.Enabled = $true
+				$buttonStart.BackColor = [System.Drawing.SystemColors]::Control
+				return
 			}
 			$text = "Completed updating the Operations Manager Database: $($opsMgrSQLInstanceTextBox.Text)"
 			$toolstripstatusStep.Visible = $true
@@ -14022,6 +14062,7 @@ EXEC sp_fulltext_database 'enable'
 				$dwSQLinstance,
 				$dwSQLdb) #Pass any arguments using the ArgumentList parameter
 			#Important: Do not access form controls from this script block.
+			$ErrorActionPreference = 'Stop'
 			. ([ScriptBlock]::Create($WriteActivityLogFunction)) #Important: Do not access form controls from this script block.)
 			. ([ScriptBlock]::Create($invokeSQLFunction)) #Important: Do not access form controls from this script block.)
 			. ([ScriptBlock]::Create($script)) #Important: Do not access form controls from this script block.)
@@ -14030,7 +14071,22 @@ EXEC sp_fulltext_database 'enable'
 		}`
 					   -CompletedScript {
 			Param ($Job)
-			$mainResults = Receive-Job -Job $Job
+			try
+			{
+				if ($null -eq $Job) { throw 'The database configuration job could not be started.' }
+				$mainResults = Receive-Job -Job $Job -ErrorAction Stop
+				if ($Job.State -ne 'Completed') { throw "The database configuration job ended in state $($Job.State)." }
+			}
+			catch
+			{
+				$text = "Database configuration failed: $($_.Exception.Message)"
+				$toolstripstatusStep.Visible = $true
+				$toolstripstatusStep.Text = $text
+				$buttonStart.Enabled = $true
+				$buttonStart.BackColor = [System.Drawing.SystemColors]::Control
+				Write-ActivityLog $text -IsError
+				return
+			}
 			
 			$text = "Completed updating the Operations Manager Database Configuration: $($opsMgrSQLInstanceTextBox.Text)"
 			$toolstripstatusStep.Visible = $true
@@ -14077,6 +14133,7 @@ EXEC sp_fulltext_database 'enable'
 				$dwSQLinstance,
 				$dwSQLdb) #Pass any arguments using the ArgumentList parameter
 			#Important: Do not access form controls from this script block.
+			$ErrorActionPreference = 'Stop'
 			. ([ScriptBlock]::Create($WriteActivityLogFunction)) #Important: Do not access form controls from this script block.)
 			. ([ScriptBlock]::Create($invokeSQLFunction)) #Important: Do not access form controls from this script block.)
 			. ([ScriptBlock]::Create($script)) #Important: Do not access form controls from this script block.)
@@ -14085,7 +14142,22 @@ EXEC sp_fulltext_database 'enable'
 		}`
 					   -CompletedScript {
 			Param ($Job)
-			$mainResults = Receive-Job -Job $Job
+			try
+			{
+				if ($null -eq $Job) { throw 'The Data Warehouse update job could not be started.' }
+				$mainResults = Receive-Job -Job $Job -ErrorAction Stop
+				if ($Job.State -ne 'Completed') { throw "The Data Warehouse update job ended in state $($Job.State)." }
+			}
+			catch
+			{
+				$text = "Data Warehouse update failed: $($_.Exception.Message)"
+				$toolstripstatusStep.Visible = $true
+				$toolstripstatusStep.Text = $text
+				$buttonStart.Enabled = $true
+				$buttonStart.BackColor = [System.Drawing.SystemColors]::Control
+				Write-ActivityLog $text -IsError
+				return
+			}
 			if ($mainResults)
 			{
 				Write-ActivityLog $mainResults
@@ -14093,6 +14165,10 @@ EXEC sp_fulltext_database 'enable'
 			else
 			{
 				Write-ActivityLog "Empty results! Something is wrong!" -IsError
+				$toolstripstatusStep.Text = 'Data Warehouse update failed: no audit results were returned.'
+				$buttonStart.Enabled = $true
+				$buttonStart.BackColor = [System.Drawing.SystemColors]::Control
+				return
 			}
 			$text = "Completed updating the Operations Manager Data Warehouse Database: $($opsMgrDWSQLInstanceTextBox.Text)"
 			$toolstripstatusStep.Visible = $true
@@ -20666,25 +20742,25 @@ function Show-DatabaseConfiguration_psf
 			{
 				$firstReturn = Invoke-SqlCommand -ServerInstance $opsDBSQLInstance -Database $opsDBName -Query @"
 			-- Operations Manager DB Info
-			DECLARE @OpsMgrSQLInstance nvarchar(50) = '$opsDBSQLInstance'
-			DECLARE @OpsMgrSQLDB nvarchar(50) = '$opsDBName'
+			DECLARE @OpsMgrSQLInstance nvarchar(max) = @PreviewServerInstance
+			DECLARE @OpsMgrSQLDB sysname = DB_NAME()
 
 			-- Operations Manager DW DB Info
-			--DECLARE @DWSQLInstance nvarchar(50) = 'SQL-SCEM01\SCEM'
-			--DECLARE @DWDBName nvarchar(50) = 'OperationsManagerDW'
+			--DECLARE @DWSQLInstance nvarchar(max) = @PreviewServerInstance
+			--DECLARE @DWDBName sysname = DB_NAME()
 
-			DECLARE @UseOpsMgrDB nvarchar(50) = QUOTENAME(@OpsMgrSQLDB) + N'.sys.sp_executesql'
-			--DECLARE @UseDWDB nvarchar(50) = QUOTENAME(@DWDBName) + N'.sys.sp_executesql'
-			DECLARE @tblName varchar(100)
-			DECLARE @colName varchar(100)
-			DECLARE @sqlstmt nvarchar(1000)
+			DECLARE @UseOpsMgrDB nvarchar(max) = QUOTENAME(@OpsMgrSQLDB) + N'.sys.sp_executesql'
+			--DECLARE @UseDWDB nvarchar(max) = QUOTENAME(@DWDBName) + N'.sys.sp_executesql'
+			DECLARE @tblName sysname
+			DECLARE @colName nvarchar(max)
+			DECLARE @sqlstmt nvarchar(max)
 
 			SET @tblName = 'GlobalSettings'
-			SET @colName = (SELECT TOP(1) SettingValue FROM GlobalSettings WHERE ManagedTypePropertyId IN (select ManagedTypePropertyId from [dbo].[ManagedTypeProperty] where [ManagedTypePropertyName] like 'MainDatabaseServerName'))
+			SET @colName = (SELECT TOP(1) SettingValue FROM dbo.GlobalSettings WHERE ManagedTypePropertyId IN (select ManagedTypePropertyId from [dbo].[ManagedTypeProperty] where [ManagedTypePropertyName] like 'MainDatabaseServerName'))
 
-			SET @sqlstmt = N'SELECT TOP(1) ''' + @tblName + ''' AS TableName, ''' + (SELECT TOP(1) CAST(ManagedTypePropertyId AS NVARCHAR(MAX)) FROM GlobalSettings WHERE ManagedTypePropertyId IN (select ManagedTypePropertyId from [dbo].[ManagedTypeProperty] where [ManagedTypePropertyName] like 'MainDatabaseServerName')) + ''' AS ColumnName, ''' + @colName + ''' AS Value FROM ' + @tblName
-			exec @UseOpsMgrDB @sqlstmt
-"@ -As DataRow -ErrorAction Stop
+			SET @sqlstmt = N'SELECT TOP(1) @TableName AS TableName, CONVERT(nvarchar(36), ManagedTypePropertyId) AS ColumnName, SettingValue AS Value FROM dbo.GlobalSettings WHERE ManagedTypePropertyId IN (SELECT ManagedTypePropertyId FROM dbo.ManagedTypeProperty WHERE ManagedTypePropertyName = N''MainDatabaseServerName'')'
+			exec @UseOpsMgrDB @sqlstmt, N'@TableName sysname', @TableName = @tblName
+"@ -As DataRow -ErrorAction Stop -Parameters @{ '@PreviewServerInstance' = $opsDBSQLInstance }
 			}
 			catch
 			{
@@ -20697,25 +20773,26 @@ function Show-DatabaseConfiguration_psf
 			{
 				$secondReturn = Invoke-SqlCommand -ServerInstance $opsDBSQLInstance -Database $opsDBName -Query @"
 			-- Operations Manager DB Info
-			DECLARE @OpsMgrSQLInstance nvarchar(50) = '$opsDBSQLInstance'
-			DECLARE @OpsMgrSQLDB nvarchar(50) = '$opsDBName'
+			DECLARE @OpsMgrSQLInstance nvarchar(max) = @PreviewServerInstance
+			DECLARE @OpsMgrSQLDB sysname = DB_NAME()
 
 			-- Operations Manager DW DB Info
-			--DECLARE @DWSQLInstance nvarchar(50) = '$opsDWSQLInstance'
-			--DECLARE @DWDBName nvarchar(50) = '$opsDWName'
+			--DECLARE @DWSQLInstance nvarchar(max) = @PreviewServerInstance
+			--DECLARE @DWDBName sysname = DB_NAME()
 
-			DECLARE @UseOpsMgrDB nvarchar(50) = QUOTENAME(@OpsMgrSQLDB) + N'.sys.sp_executesql'
-			--DECLARE @UseDWDB nvarchar(50) = QUOTENAME(@DWDBName) + N'.sys.sp_executesql'
-			DECLARE @tblName varchar(100)
-			DECLARE @colName varchar(100)
-			DECLARE @sqlstmt nvarchar(1000)
+			DECLARE @UseOpsMgrDB nvarchar(max) = QUOTENAME(@OpsMgrSQLDB) + N'.sys.sp_executesql'
+			--DECLARE @UseDWDB nvarchar(max) = QUOTENAME(@DWDBName) + N'.sys.sp_executesql'
+			DECLARE @tblName sysname
+			DECLARE @colName sysname
+			DECLARE @sqlstmt nvarchar(max)
 
 			SET @tblName = 'MT_Microsoft`$SystemCenter`$DataWarehouse'
-			SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'MainDatabaseServerName_%')
+			SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'MainDatabaseServerName_%')
+			IF @colName IS NULL THROW 50000, 'A required SCOM server-name column was not found.', 1;
 
-			SET @sqlstmt = N'SELECT TOP(1) ''' + @tblName + ''' AS TableName, ''' + (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'MainDatabaseServerName_%') + ''' AS ColumnName,' + @colName + ' AS Value FROM ' + @tblName
-			exec @UseOpsMgrDB @sqlstmt
-"@ -As DataRow -ErrorAction Stop
+			SET @sqlstmt = N'SELECT TOP(1) @TableName AS TableName, @ColumnName AS ColumnName, ' + QUOTENAME(@colName) + N' AS Value FROM [dbo].' + QUOTENAME(@tblName)
+			exec @UseOpsMgrDB @sqlstmt, N'@TableName sysname, @ColumnName sysname', @TableName = @tblName, @ColumnName = @colName
+"@ -As DataRow -ErrorAction Stop -Parameters @{ '@PreviewServerInstance' = $opsDBSQLInstance }
 			}
 			catch
 			{
@@ -20728,25 +20805,26 @@ function Show-DatabaseConfiguration_psf
 			{
 				$thirdReturn = Invoke-SqlCommand -ServerInstance $opsDBSQLInstance -Database $opsDBName -Query @"
 			-- Operations Manager DB Info
-			DECLARE @OpsMgrSQLInstance nvarchar(50) = '$opsDBSQLInstance'
-			DECLARE @OpsMgrSQLDB nvarchar(50) = '$opsDBName'
+			DECLARE @OpsMgrSQLInstance nvarchar(max) = @PreviewServerInstance
+			DECLARE @OpsMgrSQLDB sysname = DB_NAME()
 
 			-- Operations Manager DW DB Info
-			--DECLARE @DWSQLInstance nvarchar(50) = '$opsDWSQLInstance'
-			--DECLARE @DWDBName nvarchar(50) = '$opsDWName'
+			--DECLARE @DWSQLInstance nvarchar(max) = @PreviewServerInstance
+			--DECLARE @DWDBName sysname = DB_NAME()
 
-			DECLARE @UseOpsMgrDB nvarchar(50) = QUOTENAME(@OpsMgrSQLDB) + N'.sys.sp_executesql'
-			--DECLARE @UseDWDB nvarchar(50) = QUOTENAME(@DWDBName) + N'.sys.sp_executesql'
-			DECLARE @tblName varchar(100)
-			DECLARE @colName varchar(100)
-			DECLARE @sqlstmt nvarchar(1000)
+			DECLARE @UseOpsMgrDB nvarchar(max) = QUOTENAME(@OpsMgrSQLDB) + N'.sys.sp_executesql'
+			--DECLARE @UseDWDB nvarchar(max) = QUOTENAME(@DWDBName) + N'.sys.sp_executesql'
+			DECLARE @tblName sysname
+			DECLARE @colName sysname
+			DECLARE @sqlstmt nvarchar(max)
 
 			SET @tblName = 'MT_Microsoft`$SystemCenter`$DataWarehouse_Log'
-			SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'Post_MainDatabaseServerName_%')
+			SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'Post_MainDatabaseServerName_%')
+			IF @colName IS NULL THROW 50000, 'A required SCOM server-name column was not found.', 1;
 
-			SET @sqlstmt = N'SELECT TOP(1) ''' + @tblName + ''' AS TableName, ''' + (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'Post_MainDatabaseServerName_%') + ''' AS ColumnName,' + @colName + ' AS Value FROM ' + @tblName
-			exec @UseOpsMgrDB @sqlstmt
-"@ -As DataRow -ErrorAction Stop
+			SET @sqlstmt = N'SELECT TOP(1) @TableName AS TableName, @ColumnName AS ColumnName, ' + QUOTENAME(@colName) + N' AS Value FROM [dbo].' + QUOTENAME(@tblName)
+			exec @UseOpsMgrDB @sqlstmt, N'@TableName sysname, @ColumnName sysname', @TableName = @tblName, @ColumnName = @colName
+"@ -As DataRow -ErrorAction Stop -Parameters @{ '@PreviewServerInstance' = $opsDBSQLInstance }
 			}
 			catch
 			{
@@ -20759,25 +20837,26 @@ function Show-DatabaseConfiguration_psf
 			{
 				$fourthReturn = Invoke-SqlCommand -ServerInstance $opsDBSQLInstance -Database $opsDBName -Query @"
 			-- Operations Manager DB Info
-			DECLARE @OpsMgrSQLInstance nvarchar(50) = '$opsDBSQLInstance'
-			DECLARE @OpsMgrSQLDB nvarchar(50) = '$opsDBName'
+			DECLARE @OpsMgrSQLInstance nvarchar(max) = @PreviewServerInstance
+			DECLARE @OpsMgrSQLDB sysname = DB_NAME()
 
 			-- Operations Manager DW DB Info
-			--DECLARE @DWSQLInstance nvarchar(50) = '$opsDWSQLInstance'
-			--DECLARE @DWDBName nvarchar(50) = '$opsDWName'
+			--DECLARE @DWSQLInstance nvarchar(max) = @PreviewServerInstance
+			--DECLARE @DWDBName sysname = DB_NAME()
 
-			DECLARE @UseOpsMgrDB nvarchar(50) = QUOTENAME(@OpsMgrSQLDB) + N'.sys.sp_executesql'
-			--DECLARE @UseDWDB nvarchar(50) = QUOTENAME(@DWDBName) + N'.sys.sp_executesql'
-			DECLARE @tblName varchar(100)
-			DECLARE @colName varchar(100)
-			DECLARE @sqlstmt nvarchar(1000)
+			DECLARE @UseOpsMgrDB nvarchar(max) = QUOTENAME(@OpsMgrSQLDB) + N'.sys.sp_executesql'
+			--DECLARE @UseDWDB nvarchar(max) = QUOTENAME(@DWDBName) + N'.sys.sp_executesql'
+			DECLARE @tblName sysname
+			DECLARE @colName sysname
+			DECLARE @sqlstmt nvarchar(max)
 
 			SET @tblName = 'MT_Microsoft`$SystemCenter`$DataWarehouse`$AppMonitoring'
-			SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'MainDatabaseServerName_%')
+			SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'MainDatabaseServerName_%')
+			IF @colName IS NULL THROW 50000, 'A required SCOM server-name column was not found.', 1;
 
-			SET @sqlstmt = N'SELECT TOP(1) ''' + @tblName + ''' AS TableName, ''' + (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'MainDatabaseServerName_%') + ''' AS ColumnName,' + @colName + ' AS Value FROM ' + @tblName
-			exec @UseOpsMgrDB @sqlstmt
-"@ -As DataRow -ErrorAction Stop
+			SET @sqlstmt = N'SELECT TOP(1) @TableName AS TableName, @ColumnName AS ColumnName, ' + QUOTENAME(@colName) + N' AS Value FROM [dbo].' + QUOTENAME(@tblName)
+			exec @UseOpsMgrDB @sqlstmt, N'@TableName sysname, @ColumnName sysname', @TableName = @tblName, @ColumnName = @colName
+"@ -As DataRow -ErrorAction Stop -Parameters @{ '@PreviewServerInstance' = $opsDBSQLInstance }
 			}
 			catch
 			{
@@ -20790,20 +20869,21 @@ function Show-DatabaseConfiguration_psf
 			{
 				$fifthReturn = Invoke-SqlCommand -ServerInstance $opsDBSQLInstance -Database $opsDBName -Query @"
 			-- Operations Manager DB Info
-			DECLARE @OpsMgrSQLInstance nvarchar(50) = '$opsDBSQLInstance'
-			DECLARE @OpsMgrSQLDB nvarchar(50) = '$opsDBName'
+			DECLARE @OpsMgrSQLInstance nvarchar(max) = @PreviewServerInstance
+			DECLARE @OpsMgrSQLDB sysname = DB_NAME()
 
-			DECLARE @UseOpsMgrDB nvarchar(50) = QUOTENAME(@OpsMgrSQLDB) + N'.sys.sp_executesql'
-			DECLARE @tblName varchar(100)
-			DECLARE @colName varchar(100)
-			DECLARE @sqlstmt nvarchar(1000)
+			DECLARE @UseOpsMgrDB nvarchar(max) = QUOTENAME(@OpsMgrSQLDB) + N'.sys.sp_executesql'
+			DECLARE @tblName sysname
+			DECLARE @colName sysname
+			DECLARE @sqlstmt nvarchar(max)
 
 
 			SET @tblName = 'MT_Microsoft`$SystemCenter`$ManagementGroup'
-			SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'SQLServerName_%')
-			SET @sqlstmt = N'SELECT TOP(1) ''' + @tblName + ''' AS TableName, ''' + (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'SQLServerName_%') + ''' AS ColumnName,' + @colName + ' AS Value FROM ' + @tblName
-			exec @UseOpsMgrDB @sqlstmt
-"@ -As DataRow -ErrorAction Stop
+			SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'SQLServerName_%')
+			IF @colName IS NULL THROW 50000, 'A required SCOM server-name column was not found.', 1;
+			SET @sqlstmt = N'SELECT TOP(1) @TableName AS TableName, @ColumnName AS ColumnName, ' + QUOTENAME(@colName) + N' AS Value FROM [dbo].' + QUOTENAME(@tblName)
+			exec @UseOpsMgrDB @sqlstmt, N'@TableName sysname, @ColumnName sysname', @TableName = @tblName, @ColumnName = @colName
+"@ -As DataRow -ErrorAction Stop -Parameters @{ '@PreviewServerInstance' = $opsDBSQLInstance }
 			}
 			catch
 			{
@@ -20816,25 +20896,26 @@ function Show-DatabaseConfiguration_psf
 			{
 				$sixthReturn = Invoke-SqlCommand -ServerInstance $opsDBSQLInstance -Database $opsDBName -Query @"
 			-- Operations Manager DB Info
-			DECLARE @OpsMgrSQLInstance nvarchar(50) = '$opsDBSQLInstance'
-			DECLARE @OpsMgrSQLDB nvarchar(50) = '$opsDBName'
+			DECLARE @OpsMgrSQLInstance nvarchar(max) = @PreviewServerInstance
+			DECLARE @OpsMgrSQLDB sysname = DB_NAME()
 
 			-- Operations Manager DW DB Info
-			--DECLARE @DWSQLInstance nvarchar(50) = '$opsDWSQLInstance'
-			--DECLARE @DWDBName nvarchar(50) = '$opsDWName'
+			--DECLARE @DWSQLInstance nvarchar(max) = @PreviewServerInstance
+			--DECLARE @DWDBName sysname = DB_NAME()
 
-			DECLARE @UseOpsMgrDB nvarchar(50) = QUOTENAME(@OpsMgrSQLDB) + N'.sys.sp_executesql'
-			--DECLARE @UseDWDB nvarchar(50) = QUOTENAME(@DWDBName) + N'.sys.sp_executesql'
-			DECLARE @tblName varchar(100)
-			DECLARE @colName varchar(100)
-			DECLARE @sqlstmt nvarchar(1000)
+			DECLARE @UseOpsMgrDB nvarchar(max) = QUOTENAME(@OpsMgrSQLDB) + N'.sys.sp_executesql'
+			--DECLARE @UseDWDB nvarchar(max) = QUOTENAME(@DWDBName) + N'.sys.sp_executesql'
+			DECLARE @tblName sysname
+			DECLARE @colName sysname
+			DECLARE @sqlstmt nvarchar(max)
 
 			SET @tblName = 'MT_Microsoft`$SystemCenter`$OpsMgrDB`$AppMonitoring'
-			SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'MainDatabaseServerName_%')
+			SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'MainDatabaseServerName_%')
+			IF @colName IS NULL THROW 50000, 'A required SCOM server-name column was not found.', 1;
 
-			SET @sqlstmt = N'SELECT TOP(1) ''' + @tblName + ''' AS TableName, ''' + (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'MainDatabaseServerName_%') + ''' AS ColumnName,' + @colName + ' AS Value FROM ' + @tblName
-			exec @UseOpsMgrDB @sqlstmt
-"@ -As DataRow -ErrorAction Stop
+			SET @sqlstmt = N'SELECT TOP(1) @TableName AS TableName, @ColumnName AS ColumnName, ' + QUOTENAME(@colName) + N' AS Value FROM [dbo].' + QUOTENAME(@tblName)
+			exec @UseOpsMgrDB @sqlstmt, N'@TableName sysname, @ColumnName sysname', @TableName = @tblName, @ColumnName = @colName
+"@ -As DataRow -ErrorAction Stop -Parameters @{ '@PreviewServerInstance' = $opsDBSQLInstance }
 			}
 			catch
 			{
@@ -20847,25 +20928,26 @@ function Show-DatabaseConfiguration_psf
 			{
 				$seventhReturn = Invoke-SqlCommand -ServerInstance $opsDBSQLInstance -Database $opsDBName -Query @"
 			-- Operations Manager DB Info
-			DECLARE @OpsMgrSQLInstance nvarchar(50) = '$opsDBSQLInstance'
-			DECLARE @OpsMgrSQLDB nvarchar(50) = '$opsDBName'
+			DECLARE @OpsMgrSQLInstance nvarchar(max) = @PreviewServerInstance
+			DECLARE @OpsMgrSQLDB sysname = DB_NAME()
 
 			-- Operations Manager DW DB Info
-			--DECLARE @DWSQLInstance nvarchar(50) = '$opsDWSQLInstance'
-			--DECLARE @DWDBName nvarchar(50) = '$opsDWName'
+			--DECLARE @DWSQLInstance nvarchar(max) = @PreviewServerInstance
+			--DECLARE @DWDBName sysname = DB_NAME()
 
-			DECLARE @UseOpsMgrDB nvarchar(50) = QUOTENAME(@OpsMgrSQLDB) + N'.sys.sp_executesql'
-			--DECLARE @UseDWDB nvarchar(50) = QUOTENAME(@DWDBName) + N'.sys.sp_executesql'
-			DECLARE @tblName varchar(100)
-			DECLARE @colName varchar(100)
-			DECLARE @sqlstmt nvarchar(1000)
+			DECLARE @UseOpsMgrDB nvarchar(max) = QUOTENAME(@OpsMgrSQLDB) + N'.sys.sp_executesql'
+			--DECLARE @UseDWDB nvarchar(max) = QUOTENAME(@DWDBName) + N'.sys.sp_executesql'
+			DECLARE @tblName sysname
+			DECLARE @colName sysname
+			DECLARE @sqlstmt nvarchar(max)
 
 			SET @tblName = 'MT_Microsoft`$SystemCenter`$OpsMgrDB`$AppMonitoring_Log'
-			SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'Post_MainDatabaseServerName_%')
+			SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'Post_MainDatabaseServerName_%')
+			IF @colName IS NULL THROW 50000, 'A required SCOM server-name column was not found.', 1;
 
-			SET @sqlstmt = N'SELECT TOP(1) ''' + @tblName + ''' AS TableName, ''' + (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'Post_MainDatabaseServerName_%') + ''' AS ColumnName,' + @colName + ' AS Value FROM ' + @tblName
-			exec @UseOpsMgrDB @sqlstmt
-"@ -As DataRow -ErrorAction Stop
+			SET @sqlstmt = N'SELECT TOP(1) @TableName AS TableName, @ColumnName AS ColumnName, ' + QUOTENAME(@colName) + N' AS Value FROM [dbo].' + QUOTENAME(@tblName)
+			exec @UseOpsMgrDB @sqlstmt, N'@TableName sysname, @ColumnName sysname', @TableName = @tblName, @ColumnName = @colName
+"@ -As DataRow -ErrorAction Stop -Parameters @{ '@PreviewServerInstance' = $opsDBSQLInstance }
 			}
 			catch
 			{
@@ -20878,25 +20960,26 @@ function Show-DatabaseConfiguration_psf
 			{
 				$eighthReturn = Invoke-SqlCommand -ServerInstance $opsDBSQLInstance -Database $opsDBName -Query @"
 			-- Operations Manager DB Info
-			DECLARE @OpsMgrSQLInstance nvarchar(50) = '$opsDBSQLInstance'
-			DECLARE @OpsMgrSQLDB nvarchar(50) = '$opsDBName'
+			DECLARE @OpsMgrSQLInstance nvarchar(max) = @PreviewServerInstance
+			DECLARE @OpsMgrSQLDB sysname = DB_NAME()
 
 			-- Operations Manager DW DB Info
-			--DECLARE @DWSQLInstance nvarchar(50) = '$opsDWSQLInstance'
-			--DECLARE @DWDBName nvarchar(50) = '$opsDWName'
+			--DECLARE @DWSQLInstance nvarchar(max) = @PreviewServerInstance
+			--DECLARE @DWDBName sysname = DB_NAME()
 
-			DECLARE @UseOpsMgrDB nvarchar(50) = QUOTENAME(@OpsMgrSQLDB) + N'.sys.sp_executesql'
-			--DECLARE @UseDWDB nvarchar(50) = QUOTENAME(@DWDBName) + N'.sys.sp_executesql'
-			DECLARE @tblName varchar(100)
-			DECLARE @colName varchar(100)
-			DECLARE @sqlstmt nvarchar(1000)
+			DECLARE @UseOpsMgrDB nvarchar(max) = QUOTENAME(@OpsMgrSQLDB) + N'.sys.sp_executesql'
+			--DECLARE @UseDWDB nvarchar(max) = QUOTENAME(@DWDBName) + N'.sys.sp_executesql'
+			DECLARE @tblName sysname
+			DECLARE @colName sysname
+			DECLARE @sqlstmt nvarchar(max)
 
 			SET @tblName = 'MT_Microsoft`$SystemCenter`$OpsMgrDWWatcher'
-			SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'DatabaseServerName_%')
+			SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'DatabaseServerName_%')
+			IF @colName IS NULL THROW 50000, 'A required SCOM server-name column was not found.', 1;
 
-			SET @sqlstmt = N'SELECT TOP(1) ''' + @tblName + ''' AS TableName, ''' + (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'DatabaseServerName_%') + ''' AS ColumnName,' + @colName + ' AS Value FROM ' + @tblName
-			exec @UseOpsMgrDB @sqlstmt
-"@ -As DataRow -ErrorAction Stop
+			SET @sqlstmt = N'SELECT TOP(1) @TableName AS TableName, @ColumnName AS ColumnName, ' + QUOTENAME(@colName) + N' AS Value FROM [dbo].' + QUOTENAME(@tblName)
+			exec @UseOpsMgrDB @sqlstmt, N'@TableName sysname, @ColumnName sysname', @TableName = @tblName, @ColumnName = @colName
+"@ -As DataRow -ErrorAction Stop -Parameters @{ '@PreviewServerInstance' = $opsDBSQLInstance }
 			}
 			catch
 			{
@@ -20909,25 +20992,26 @@ function Show-DatabaseConfiguration_psf
 			{
 				$ninethReturn = Invoke-SqlCommand -ServerInstance $opsDBSQLInstance -Database $opsDBName -Query @"
 			-- Operations Manager DB Info
-			DECLARE @OpsMgrSQLInstance nvarchar(50) = '$opsDBSQLInstance'
-			DECLARE @OpsMgrSQLDB nvarchar(50) = '$opsDBName'
+			DECLARE @OpsMgrSQLInstance nvarchar(max) = @PreviewServerInstance
+			DECLARE @OpsMgrSQLDB sysname = DB_NAME()
 
 			-- Operations Manager DW DB Info
-			--DECLARE @DWSQLInstance nvarchar(50) = '$opsDWSQLInstance'
-			--DECLARE @DWDBName nvarchar(50) = '$opsDWName'
+			--DECLARE @DWSQLInstance nvarchar(max) = @PreviewServerInstance
+			--DECLARE @DWDBName sysname = DB_NAME()
 
-			DECLARE @UseOpsMgrDB nvarchar(50) = QUOTENAME(@OpsMgrSQLDB) + N'.sys.sp_executesql'
-			--DECLARE @UseDWDB nvarchar(50) = QUOTENAME(@DWDBName) + N'.sys.sp_executesql'
-			DECLARE @tblName varchar(100)
-			DECLARE @colName varchar(100)
-			DECLARE @sqlstmt nvarchar(1000)
+			DECLARE @UseOpsMgrDB nvarchar(max) = QUOTENAME(@OpsMgrSQLDB) + N'.sys.sp_executesql'
+			--DECLARE @UseDWDB nvarchar(max) = QUOTENAME(@DWDBName) + N'.sys.sp_executesql'
+			DECLARE @tblName sysname
+			DECLARE @colName sysname
+			DECLARE @sqlstmt nvarchar(max)
 
 			SET @tblName = 'MT_Microsoft`$SystemCenter`$OpsMgrDWWatcher_Log'
-			SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'Post_DatabaseServerName_%')
+			SET @colName = (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'Post_DatabaseServerName_%')
+			IF @colName IS NULL THROW 50000, 'A required SCOM server-name column was not found.', 1;
 
-			SET @sqlstmt = N'SELECT TOP(1) ''' + @tblName + ''' AS TableName, ''' + (SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tblName AND COLUMN_NAME LIKE 'Post_DatabaseServerName_%') + ''' AS ColumnName,' + @colName + ' AS Value FROM ' + @tblName
-			exec @UseOpsMgrDB @sqlstmt
-"@ -As DataRow -ErrorAction Stop
+			SET @sqlstmt = N'SELECT TOP(1) @TableName AS TableName, @ColumnName AS ColumnName, ' + QUOTENAME(@colName) + N' AS Value FROM [dbo].' + QUOTENAME(@tblName)
+			exec @UseOpsMgrDB @sqlstmt, N'@TableName sysname, @ColumnName sysname', @TableName = @tblName, @ColumnName = @colName
+"@ -As DataRow -ErrorAction Stop -Parameters @{ '@PreviewServerInstance' = $opsDBSQLInstance }
 			}
 			catch
 			{
@@ -20940,25 +21024,25 @@ function Show-DatabaseConfiguration_psf
 			{
 				$tenthReturn = Invoke-SqlCommand -ServerInstance $opsDWSQLInstance -Database $opsDWName -Query @"
 			-- Operations Manager DB Info
-			--DECLARE @OpsMgrSQLInstance nvarchar(50) = '$opsDWSQLInstance'
-			--DECLARE @OpsMgrSQLDB nvarchar(50) = '$opsDWName'
+			--DECLARE @OpsMgrSQLInstance nvarchar(max) = @PreviewServerInstance
+			--DECLARE @OpsMgrSQLDB sysname = DB_NAME()
 
 			-- Operations Manager DW DB Info
-			DECLARE @DWSQLInstance nvarchar(50) = '$opsDWSQLInstance'
-			DECLARE @DWDBName nvarchar(50) = '$opsDWName'
+			DECLARE @DWSQLInstance nvarchar(max) = @PreviewServerInstance
+			DECLARE @DWDBName sysname = DB_NAME()
 
-			--DECLARE @UseOpsMgrDB nvarchar(50) = QUOTENAME(@OpsMgrSQLDB) + N'.sys.sp_executesql'
-			DECLARE @UseDWDB nvarchar(50) = QUOTENAME(@DWDBName) + N'.sys.sp_executesql'
-			DECLARE @tblName varchar(100)
-			DECLARE @colName varchar(100)
-			DECLARE @sqlstmt nvarchar(1000)
+			--DECLARE @UseOpsMgrDB nvarchar(max) = QUOTENAME(@OpsMgrSQLDB) + N'.sys.sp_executesql'
+			DECLARE @UseDWDB nvarchar(max) = QUOTENAME(@DWDBName) + N'.sys.sp_executesql'
+			DECLARE @tblName sysname
+			DECLARE @colName sysname
+			DECLARE @sqlstmt nvarchar(max)
 
 			SET @tblName = 'MemberDatabase'
 			SET @colName = 'ServerName'
 
-			SET @sqlstmt = N'SELECT TOP(1) ''' + @tblName + ''' AS TableName, ''' + @colName + ''' AS ColumnName, ''' + (SELECT TOP(1) ServerName FROM MemberDatabase) + ''' AS Value'
-			exec @UseDWDB @sqlstmt
-"@ -As DataRow -ErrorAction Stop
+			SET @sqlstmt = N'SELECT TOP(1) @TableName AS TableName, @ColumnName AS ColumnName, ServerName AS Value FROM dbo.MemberDatabase'
+			exec @UseDWDB @sqlstmt, N'@TableName sysname, @ColumnName sysname', @TableName = @tblName, @ColumnName = @colName
+"@ -As DataRow -ErrorAction Stop -Parameters @{ '@PreviewServerInstance' = $opsDWSQLInstance }
 			}
 			catch
 			{
